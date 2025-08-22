@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import os
 
 from aiogram import Bot, Dispatcher, Router, F
+from dotenv import load_dotenv
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup, InlineKeyboardButton
@@ -9,7 +11,6 @@ from aiogram.fsm.context import FSMContext
 
 from bot.utils.fsm_states import (AddTask, EditReminder,
                                   PostponeReminder, get_states_group) # Группа состояний
-from db import *  # Импортируем все операции с БД
 from bot.utils.utils import *  # Импортируем все инструменты
 from reminder import Reminder  # Импортируем класс для напоминаний
 from bot.utils.menu import menu  # Импортируем меню
@@ -17,7 +18,9 @@ from utils.callbacks import (cr_create_callback, cr_edit_callback,
                              filter_cr_action, val_from_cb,
                              filter_edit_action, task_id_from_edit,
                              action_id_from_edit)  # Импортируем функции для создания коллбэков
+from database.factory import get_db
 
+db = get_db()
 load_dotenv()
 bt = Bot(token=os.getenv('BOT_TOKEN'))
 dp = Dispatcher()
@@ -26,11 +29,12 @@ create_router = Router()  # Роутер для обработки коллбэ�
 edit_router = Router()  # Роутер для обработки коллбэков во время редактирования записи
 c_router = Router()  # Роутер для обработки коллбэков во время показа чего-либо
 
-reminder_check_delay = 60  # Задержка проверки напоминаний (1 минута)
+reminder_check_delay = 5  # Задержка проверки напоминаний (1 минута)
 logging.basicConfig(  # конфиг логгера
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+logging.getLogger('aiogram').setLevel(logging.WARNING)
 
 cancel_fsm_button = InlineKeyboardButton(text='Отмена❌', callback_data=cr_create_callback('cancel_add', ''))
 
@@ -44,13 +48,13 @@ async def view_reminders(m: Message, user: int = None):
             user = m.from_user.id
             edit_ = False
 
-        r_tasks = [task for task in await get_remind_tasks_for_user(user)
-                   if task.get('reminder') > datetime.datetime.now() - datetime.timedelta(seconds=1)]
+        r_tasks = [task for task in await db.get_remind_tasks_for_user(user)
+                   if if_str_to_date(task.get('reminder')) > datetime.datetime.now() - datetime.timedelta(seconds=1)]
         if r_tasks:
             text = ("Вот список ваших напоминаний.\n"
                     "Нажмите на напоминание, чтобы удалить его.")
             for task in r_tasks:
-                keyboard.button(text=f"{task.get('name')} - {task.get('reminder').strftime("%d-%m %H:%M")}",
+                keyboard.button(text=f"{task.get('name')} - {if_str_to_date(task.get('reminder')).strftime("%d-%m %H:%M")}",
                                 callback_data=cr_edit_callback(task['id'], 'delete_reminder')).adjust(1)
         else:
             text = 'У вас нет напоминаний.'
@@ -67,7 +71,7 @@ async def view_reminders(m: Message, user: int = None):
 async def del_reminder(c: CallbackQuery):
     """Удалить напоминание."""
     try:
-        await del_reminder_for_task(int(task_id_from_edit(c.data)))
+        await db.del_reminder_for_task(int(task_id_from_edit(c.data)))
         await c.answer('Успешно удалено.')
         await view_reminders(c.message, user=c.from_user.id)
     except Exception as e:
@@ -153,7 +157,7 @@ async def add_reminder(c: CallbackQuery | Message, state: FSMContext):
             task_id = task_id_from_edit(c.data)
             c = c.message
 
-        old_rem = (await get_task_by_id(task_id))[-1].get('reminder')
+        old_rem = if_str_to_date((await db.get_task_by_id(task_id))[-1].get('reminder'))
 
         if old_rem:
             mk.button(text='Оставить тот же день.', callback_data=cr_edit_callback(
@@ -212,7 +216,7 @@ async def user_rem_date(c: Message, state: FSMContext, templ=None):
 @create_router.callback_query(AddTask.received_reminder_dt, filter_cr_action('cancel_reminder'))
 async def finish_with_no_reminder(c: CallbackQuery, state: FSMContext):
     try:
-        await cr_task(user_id=c.from_user.id, **await state.get_data())
+        await db.cr_task(user_id=c.from_user.id, **await state.get_data())
     except Exception as e:
         logger.error(f'ERROR WITH INSERT INTO DB, NO REMINDER : {e}')
 
@@ -233,14 +237,14 @@ async def finish_creation(c: Message, state: FSMContext):
         validate_date(tm)
         await state.update_data({'reminder': tm})
         if cs == AddTask:
-            await cr_task(user_id=c.from_user.id, **await state.get_data())
+            await db.cr_task(user_id=c.from_user.id, **await state.get_data())
             await c.answer(text=r'Задача <b>успешно</b> создана! Введите /list чтобы увидеть ваши задачи.',
                            parse_mode='HTML')
             logger.info(f'USER {c.from_user.id} CREATED TASK.')
         else:
-            await edit_reminder(reminder=await state.get_value('reminder'),
+            await db.edit_reminder(reminder=await state.get_value('reminder'),
                                 task_id=await state.get_value('task_id'))
-            await upd_sent_reminder(await state.get_value('task_id'), False)
+            await db.upd_sent_reminder(await state.get_value('task_id'), False)
             await c.answer('Напоминание успешно отредактировано.')
         await state.clear()
     except InvalidDateError:
@@ -254,6 +258,8 @@ async def finish_creation(c: Message, state: FSMContext):
         logger.error(e)
 
 @c_router.callback_query(filter_cr_action('cancel_add'))
+@create_router.callback_query(filter_cr_action('cancel_add'))
+@edit_router.callback_query(filter_cr_action('cancel_add'))
 async def cancel_add(c: CallbackQuery, state: FSMContext):
     if await state.get_state():
         await state.clear()
@@ -274,7 +280,7 @@ async def show_list(m: Message, from_: bool = False,  state: FSMContext = None,)
             await m.answer(f'Вы отменили {text}')
         await state.clear()
 
-    tasks = await get_tasks(m.chat.id)
+    tasks = await db.get_tasks(m.chat.id)
 
     if not tasks:
         text = "Вы ещё не создали ни одной задачи, введите /add, чтобы начать создание."
@@ -295,7 +301,7 @@ async def show_list(m: Message, from_: bool = False,  state: FSMContext = None,)
 
 @c_router.message(Command("listuncompleted"))
 async def show_unc_tasks(m: Message, from_: bool = False):
-    tasks = await get_uncompleted_tasks(m.chat.id)
+    tasks = await db.get_uncompleted_tasks(m.chat.id)
 
     if not tasks:
         text = ("У вас пока нет невыполненных задач.\n"
@@ -317,7 +323,7 @@ async def show_unc_tasks(m: Message, from_: bool = False):
 
 @c_router.callback_query(filter_edit_action('show_task'))
 async def show_exact_task(c: CallbackQuery):
-    task = await get_task_by_id(task_id := int(task_id_from_edit(c.data)))
+    task = await db.get_task_by_id(task_id := int(task_id_from_edit(c.data)))
 
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text='Удалить задачу🗑️', callback_data=cr_edit_callback(task_id, 'del_task'))
@@ -341,7 +347,7 @@ async def back_to_list(c: CallbackQuery):
 @edit_router.callback_query(filter_edit_action('del_task'))
 async def del_task(c: CallbackQuery):
     try:
-        await del_task_by_id(int(task_id_from_edit(c.data)))
+        await db.del_task_by_id(int(task_id_from_edit(c.data)))
         await c.answer('Успешно удалено✅')
         await show_list(c.message, True)
     except Exception as e:
@@ -350,7 +356,7 @@ async def del_task(c: CallbackQuery):
 @edit_router.callback_query(filter_edit_action('upd_task_st'))
 async def ready_task(c: CallbackQuery):
     try:
-        await upd_ready(int(task_id_from_edit(c.data)))
+        await db.upd_ready(int(task_id_from_edit(c.data)))
         await c.answer('Успешно обновлено✅')
         await show_exact_task(c)
     except Exception as e:
@@ -366,8 +372,11 @@ async def postpone_task(c: CallbackQuery, state: FSMContext):
     keyboard.button(text='На день', callback_data=cr_edit_callback(task_id_from_edit(c.data), 'postpone_day'))
     keyboard.button(text='Изменить напоминание', callback_data=cr_edit_callback(task_id_from_edit(c.data), 'edit_r'))
 
+
+    old_rem = if_str_to_date((await db.get_task_by_id(task_id_from_edit(c.data)))[-1].get('reminder'))
     await state.set_state(PostponeReminder.received_reminder_dt)
-    await state.update_data({'old_reminder': (await get_task_by_id(task_id_from_edit(c.data)))[-1].get('reminder'),
+    await state.update_data({'old_reminder':
+                                 old_rem,
                              'task_id': task_id_from_edit(c.data)})
     await c.message.answer(text='Выберите, что вам нужно:', reply_markup=keyboard.adjust(2, 1).as_markup())
 
@@ -382,9 +391,9 @@ async def pp_reminder_temp(c: CallbackQuery, state: FSMContext):
         case 'day':
             date += datetime.timedelta(days=1)
 
-    await edit_reminder(reminder=date, task_id=int(await state.get_value('task_id')))
+    await db.edit_reminder(reminder=date, task_id=int(await state.get_value('task_id')))
     await bt.delete_message(c.message.chat.id, c.message.message_id)
-    await upd_sent_reminder(task_id=int(await state.get_value('task_id')), to=False)
+    await db.upd_sent_reminder(task_id=int(await state.get_value('task_id')), to=False)
     await c.message.answer('Напоминание отложено.')
 
 @c_router.message(CommandStart())
@@ -409,6 +418,7 @@ async def start_reminder():
 
 async def start_bt():
     dp.include_routers(edit_router, create_router, c_router)
+    await db.init_db()
     await bt.set_my_commands(menu)
     await dp.start_polling(bt)
 
@@ -417,4 +427,7 @@ async def main():
         tg.create_task(start_bt())
         tg.create_task(start_reminder())
 
-asyncio.run(main())
+try:
+    asyncio.run(main())
+except KeyboardInterrupt:
+    logger.info('BOT IS DOWN.')

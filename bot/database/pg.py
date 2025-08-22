@@ -1,7 +1,9 @@
-from _datetime import datetime
+import pathlib
 
 import asyncpg
 import os
+
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,6 +18,20 @@ async def get_connection():
         "port": os.getenv('DB_PORT')
     }  # параметры соединения
     return await asyncpg.connect(**db_conf)
+
+async def init_db():
+    base_dir = pathlib.Path(__file__).parent.parent
+    sql_path = base_dir / 'database' / 'scripts' / 'create_tasks_table_pg.sql'
+    conn = await get_connection()
+    try:
+        with open(sql_path) as file:
+            sql_q = file.read()
+
+        await conn.execute(
+            sql_q
+        )
+    finally:
+        await conn.close()
 
 
 async def get_tasks(user_id: int):
@@ -118,12 +134,15 @@ async def get_remind_tasks():
 async def get_remind_tasks_for_user(user_id: int):
     """Получение напоминаний для конкретного пользователя по его id."""
     conn = await get_connection()
-    tasks = await conn.fetch(
-        "SELECT * FROM tasks WHERE user_id = $1 AND reminder IS NOT NULL AND reminder_sent = false",
-        user_id
-    )
-    await conn.close()
-    return tasks
+
+    try:
+        tasks = await conn.fetch(
+            "SELECT * FROM tasks WHERE user_id = $1 AND reminder IS NOT NULL AND reminder_sent = false",
+            user_id
+        )
+        return tasks
+    finally:
+        await conn.close()
 
 async def upd_sent_reminder(task_id: int, to: bool = True):
     """Обновить информацию о том, пришло ли напоминание."""

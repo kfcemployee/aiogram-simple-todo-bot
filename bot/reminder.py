@@ -3,9 +3,12 @@ import datetime
 import logging
 
 from aiogram import Bot
-from db import get_remind_tasks, upd_sent_reminder
+from database.factory import get_db
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from utils.callbacks import cr_edit_callback
+from utils.utils import if_str_to_date
+
+db = get_db()
 
 class Reminder:
     """Класс для рассылки упоминаний"""
@@ -16,10 +19,12 @@ class Reminder:
     async def start_(self, delay: int):
         self.logger.info('REMINDER STARTED')
         while True:
-            r_tasks = await get_remind_tasks()
+            r_tasks = await db.get_remind_tasks()
 
             for task in r_tasks:
-                if task.get("reminder") == datetime.datetime.now().replace(second=0, microsecond=0):
+                cur_tm = if_str_to_date(task.get("reminder"))
+
+                if cur_tm == datetime.datetime.now().replace(second=0, microsecond=0):
                     cb_data_ready = cr_edit_callback(task['id'], 'upd_task_st')
                     cb_data_pp = cr_edit_callback(task['id'], 'postpone_task_r')
 
@@ -33,5 +38,5 @@ class Reminder:
                                                                       ]]
                                                 ), parse_mode="HTML")
                     self.logger.info(f"TASK {task.get('id')} WAS REMINDED")
-                    await upd_sent_reminder(task.get("id"), True)
+                    await db.upd_sent_reminder(task.get("id"), True)
             await asyncio.sleep(delay)
